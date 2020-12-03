@@ -1,4 +1,4 @@
-book_filename: "bookdownproj"
+book_filename: "bookdown"
 output_dir: docs
 delete_merged_file: true
 edit: https://github.com/cedricvuignier/Data_Analytics_for_decision_making/edit/master/%s
@@ -6,3 +6,11 @@ view: https://github.com/cedricvuignier/Data_Analytics_for_decision_making/blob/
 language:
   ui:
     chapter_name: "Chapter "
+
+# new_session: yes
+
+rmd_files: [
+  "index.Rmd",
+  "I_part_Analysis.Rmd",
+  "II_part_DALEX.Rmd"
+]

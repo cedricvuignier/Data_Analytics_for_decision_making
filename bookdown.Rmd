@@ -1,0 +1,1741 @@
+--- 
+title: "Data Analytics for Decision Making - Homework"
+author: "Gaëtan Lovey and Cédric Vuignier"
+date: "`r Sys.Date()`"
+site: bookdown::bookdown_site
+---
+
+# Introduction
+
+```{r setup}
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	include = FALSE
+)
+```
+
+
+
+
+```{r child = 'I_part_Analysis.Rmd'}
+```
+
+```{r child = 'II_part_DALEX.Rmd'}
+```
+
+
+<!--chapter:end:index.Rmd-->
+
+
+
+```{r include=FALSE}
+
+library(here)
+library(tidyverse)
+library(inspectdf)
+library(DataExplorer)
+library(GGally)
+library(DT)
+library(gridExtra)
+require(ggplot2)
+library(caret)
+library(broom)
+library(kableExtra)
+library(car)
+library(ROCR)
+library(modelr)
+library(RColorBrewer)
+library(rattle)
+library(NeuralNetTools)
+library(grid)
+
+
+draw_confusion_matrix <- function(cm) {
+
+  layout(matrix(c(1,1,2)))
+  par(mar=c(2,2,2,2))
+  plot(c(100, 345), c(300, 450), type = "n", xlab="", ylab="", xaxt='n', yaxt='n')
+  title('CONFUSION MATRIX', cex.main=2)
+
+  # create the matrix 
+  rect(150, 430, 240, 370, col='#3F97D0')
+  text(195, 435, 'Class1', cex=1.2)
+  rect(250, 430, 340, 370, col='#F7AD50')
+  text(295, 435, 'Class2', cex=1.2)
+  text(125, 370, 'Predicted', cex=1.3, srt=90, font=2)
+  text(245, 450, 'Actual', cex=1.3, font=2)
+  rect(150, 305, 240, 365, col='#F7AD50')
+  rect(250, 305, 340, 365, col='#3F97D0')
+  text(140, 400, 'Class1', cex=1.2, srt=90)
+  text(140, 335, 'Class2', cex=1.2, srt=90)
+
+  # add in the cm results 
+  res <- as.numeric(cm$table)
+  text(195, 400, res[1], cex=1.6, font=2, col='white')
+  text(195, 335, res[2], cex=1.6, font=2, col='white')
+  text(295, 400, res[3], cex=1.6, font=2, col='white')
+  text(295, 335, res[4], cex=1.6, font=2, col='white')
+
+  # add in the specifics 
+  plot(c(100, 0), c(100, 0), type = "n", xlab="", ylab="", main = "DETAILS", xaxt='n', yaxt='n')
+  text(10, 85, names(cm$byClass[1]), cex=1.2, font=2)
+  text(10, 70, round(as.numeric(cm$byClass[1]), 3), cex=1.2)
+  text(30, 85, names(cm$byClass[2]), cex=1.2, font=2)
+  text(30, 70, round(as.numeric(cm$byClass[2]), 3), cex=1.2)
+  text(50, 85, names(cm$byClass[5]), cex=1.2, font=2)
+  text(50, 70, round(as.numeric(cm$byClass[5]), 3), cex=1.2)
+  text(70, 85, names(cm$byClass[6]), cex=1.2, font=2)
+  text(70, 70, round(as.numeric(cm$byClass[6]), 3), cex=1.2)
+  text(90, 85, names(cm$byClass[7]), cex=1.2, font=2)
+  text(90, 70, round(as.numeric(cm$byClass[7]), 3), cex=1.2)
+
+  # add in the accuracy information 
+  text(30, 35, names(cm$overall[1]), cex=1.5, font=2)
+  text(30, 20, round(as.numeric(cm$overall[1]), 3), cex=1.4)
+  text(70, 35, names(cm$overall[2]), cex=1.5, font=2)
+  text(70, 20, round(as.numeric(cm$overall[2]), 3), cex=1.4)
+}  
+```
+
+
+# Data preparation
+We see that the database is composed of 32 variables and 1000 observations. 
+```{r message=FALSE, warning=FALSE}
+german<- read.csv("Data/GermanCredit.csv", sep = ";")
+
+#Renaming OBS. in OBS
+colnames(german)[1] <- "OBS"
+
+#Col names in lower case 
+colnames(german) <- tolower(colnames(german))
+
+#Inspecting the data frame, there are numerical and categorical values
+# head(german)
+# str(german)
+# summary(german)
+datatable(german)
+
+#Creating a new variable in order to know if credit risk is good  (1) or bad (0)
+german$risk <- ifelse(german$response == 1, "good", "bad") 
+german$risk <- as.factor(german$risk)
+german <- german %>% select(-response) #We remove the binary variable response because we will use the caterogical one (risk) that we previously created
+# is.factor(german$risk) Uncomment to know if the risk variable is a factor
+
+```
+
+# EDA
+
+We check for missing data. No missing data is observed. 
+
+```{r message = FALSE, warning = FALSE}
+library(Amelia)
+missmap(german)
+# colSums(is.na(german))
+
+```
+
+## Bad vs Good
+In general, our model will predict many more good customers 
+
+```{r message = FALSE, warning = FALSE}
+vs<-inspect_cat( select(german, risk)) 
+show_plot(vs)
+```
+
+## Anomalies
+We detected some anomalies in the database: 
+
+- guarantor: Max = 2 which is a mistake is should be 1 instead.
+- education: Min = -1 which is a mistake. It should be 1 instead.
+- age: Max = 125 which is probably a mistake. It should be 75 instead.
+
+*We will therefore modify the database with the correct information in order to optimize our future models.*
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(german$age)
+summary(german$education)
+summary(german$guarantor)
+summary(german$duration)
+summary(german$chk_acct)
+
+#data transformation
+german$age[537] <-75 
+german$education [37] <- 1
+german$guarantor [234] <- 1
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#Here, we rename the variable history
+german_EDA <- german
+
+german_EDA$job <- factor(german_EDA$job, levels = 0:3, labels=c("unemployed/unskilled", 
+     "unskilled - resident", 
+     " skilled employee/official",
+     "management/self-employed/
+highly qualifed employee/officer"))
+
+german_EDA$sav_acct <- factor(german_EDA$sav_acct, levels = 0:4, labels=c("< 100 DM", 
+     "100 ≤ ... < 500 DM", 
+     "500 ≤ ··· < 1000 DM",
+     "≥ 1000 DM",
+     "unknown/no savings account"))
+```
+
+
+```{r message = FALSE, warning = FALSE}
+ggplot(german_EDA,aes(x=job,fill = job)) +
+  geom_bar()+
+  ggtitle("Type of Jobs", subtitle = "the majority are skilled employee")+
+theme_bw()+
+      theme(axis.text = element_text(size=12,face = "bold"),
+            legend.text = element_text(size = 12),
+            axis.title.x = element_blank(),
+            axis.title.y = element_blank(),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.border = element_blank(),
+            axis.line = element_line(colour = "black"),
+            axis.text.x=element_blank())
+
+ggplot(german_EDA,aes(x=sav_acct,fill=sav_acct))+
+  geom_bar()+
+  ggtitle("Types of savings account", subtitle = "the majority have less than 100 DM")+
+  theme_bw()+
+      theme(axis.text = element_text(size=12,face = "bold"),
+            legend.text = element_text(size = 12),
+            axis.title.x = element_blank(),
+            axis.title.y = element_blank(),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.border = element_blank(),
+            axis.line = element_line(colour = "black"),
+            axis.text.x=element_blank())
+
+```
+
+## Sex analysis
+
+```{r message = FALSE, warning = FALSE}
+#create a variable sex 
+german_EDA <- german_EDA %>% mutate(sex = ifelse(male_div == 1 | male_single == 1 | male_mar_or_wid == 1, 1,0))
+
+german_EDA$sex <- factor(german_EDA$sex, levels = 0:1, labels=c("female", 
+     "male"))
+
+
+german_EDA %>% select(sex,risk) %>% group_by(sex,risk) %>% count() %>%   
+  ggplot(aes(x = sex, y = n,fill = risk)) + 
+  geom_bar(position = 'dodge', stat='identity') +
+  geom_text(aes(label=n), position=position_dodge(width=0.9), vjust=-0.25)+
+  ggtitle("Risk analysis by gender", subtitle = "the data set is not well balanced")
+
+```
+
+## Boxplot
+
+```{r message = FALSE, warning = FALSE}
+b1 <- german %>% ggplot(aes(x = risk, y = duration)) +
+  geom_boxplot(outlier.colour="red", outlier.shape=8,
+                outlier.size=1) 
+
+b2 <- german %>% ggplot(aes(x = risk, y = amount)) +
+  geom_boxplot(outlier.colour="red", outlier.shape=8,
+                outlier.size=1)  
+  
+b3 <- german %>% ggplot(aes(x = risk, y = age)) +
+  geom_boxplot(outlier.colour="red", outlier.shape=8,
+                outlier.size=1)
+
+grid.arrange(b1, b2, b3, nrow=1,
+             top = textGrob("Box Plot analysis",gp=gpar(fontsize=15,font=2)))
+```
+
+*duration*
+At-risk clients have longer credit duration 
+*amount*
+The median amounts are slightly higher for the at-risk category 
+*age*
+The median for good payers is higher.
+
+
+```{r message = FALSE, warning = FALSE}
+g1 <-  ggplot(german, aes(x = age)) + 
+  geom_histogram(bins = 20, fill = 'pink', colour = 'black') + 
+  ggtitle('Age distribution') + 
+  xlab('Age') +
+  ylab('Frequency')
+
+g2 <- ggplot(german, aes(x = amount)) + 
+  geom_histogram(bins = 20, fill = 'turquoise', colour = 'black') + 
+  ggtitle('Amount distribution') + 
+  xlab('Credit_Amount') +
+  ylab('Frequency')
+
+g3 <- ggplot(german, aes(x = duration)) + 
+  geom_histogram(bins = 20, fill = 'lightgoldenrod', colour = 'black') + 
+  ggtitle('Duration distribution') + 
+  xlab('Duration') +
+  ylab('Frequency')
+
+grid.arrange(g1, g2, g3, nrow=1)
+
+```
+
+We can see that age, amount and duration are right skewed. In order to change it, we use the log to transform them into a normal distribution. We also note that there is an error in the age variable (125 years -> 75 years).  
+
+```{r message = FALSE, warning = FALSE}
+#Transforming variables
+g1 <-  ggplot(german, aes(x = log1p(age))) + 
+  geom_histogram(bins = 20, fill = 'pink', colour = 'black') + 
+  ggtitle('Age distribution') + 
+  xlab('Age') +
+  ylab('Frequency')
+
+g2 <- ggplot(german, aes(x = log1p(amount))) + 
+  geom_histogram(bins = 20, fill = 'turquoise', colour = 'black') + 
+  ggtitle('Amount distribution') + 
+  xlab('Credit_Amount') +
+  ylab('Frequency')
+
+g3 <- ggplot(german, aes(x = log1p(duration))) + 
+  geom_histogram(bins = 20, fill = 'lightgoldenrod', colour = 'black') + 
+  ggtitle('Duration distribution') + 
+  xlab('Duration') +
+  ylab('Frequency')
+
+
+grid.arrange(g1, g2, g3, nrow=1)
+#Even if age is still a bit right skewed, it is much better than before
+```
+
+Even if age is still a bit right skewed, it is much better than before.
+
+## Correlation
+
+There is a correlation between amount and duration. This makes sense. 
+
+```{r message = FALSE, warning = FALSE}
+correlation_good <- german %>% filter(risk == "good") %>% select(amount, age, duration) 
+
+ggpairs(correlation_good)
+
+correlation_bad <- german %>% filter(risk == "bad") %>% select(amount, age, duration) 
+
+ggpairs(correlation_bad)
+```
+
+# Data modeling
+
+## Data splitting and data balancing
+
+Because we have seen in the EDA that age, amount and duration are right skewed, we transformed the data with the log. Moreover, we also scale the data in oder to normalize them.
+
+We split the dataset into a training test and a test set. The training set is used to find optimal hyperparameters when tuning them. For this process, we will use a 5-fold cross-validation applied on the train set. The test set will be used to compare and evaluate the models in order to know how well the models can generalize new data. 
+
+Therefore, we split the data set into two parts: 
+
+- Training set (80%)
+- Test set (20%)
+
+```{r message = FALSE, warning = FALSE}
+#First we tried to scale the data to normalize them 
+german <- german %>% mutate(LogAge = log(age),
+                    Log1pAmount = log1p(amount), 
+                    Log1pDuration = log1p(duration))
+
+german$LogAgestd <- scale(german$LogAge)
+german$Log1pAmountstd <- scale(german$Log1pAmount)
+german$Log1pDurationstd <- scale(german$Log1pDuration)
+
+
+german <- german %>% select(-age, -amount, -obs, -duration, -LogAge, -Log1pAmount, -Log1pDuration) 
+
+
+#Splitting the dataset into a training (80%) and a test set (20%)
+set.seed(245156)
+index <- sample(x=1:2, size = nrow(german), replace = TRUE, prob = c(0.8, 0.2))
+german.tr <- german[index == 1,]
+german.te <- german[index == 2,]
+table_tr <- table(german.tr$risk)
+table_te <- table(german.te$risk)
+accuracy <- table_te["good"]/sum(table_te) #% of reponses = good in data set
+
+```
+
+In the EDA, we saw an unbalanced dataset, we have mmuch more credits classified as good (700) than bad (300). In order to have a correct prediction, we need to balance the number of good et bad credits in our training set. It will thus improve the sensitivity and the specificity. Because the importance is to predict well risky credits in order to avoid huge losses whithin the company, we need a good specificity but the balance between both measures is important.
+
+As we can see with the risk variable, the data are unbalanced
+
+```{r message = FALSE, warning = FALSE}
+#As we can see with the risk variable, the data are unbalanced
+table(german.tr$risk) %>% kable(align = "c", col.names = c("Variable", "Frequence"))
+```
+
+Below, we display the number of bad and good credits after having balanced the training set. 
+
+```{r message = FALSE, warning = FALSE}
+#Balancing the data 
+# summary(german.tr)
+n.bad <- sum(german.tr$risk == "bad")
+n.good <- sum(german.tr$risk == "good")
+
+set.seed(245156)
+index.bad <- which(german.tr$risk == "bad")
+index.good <- sample(x = which(german.tr$risk == "good"), size = n.bad, replace = FALSE)
+
+german.tr.bal <- german.tr[c(index.bad, index.good),]
+
+table(german.tr.bal$risk) %>% kable(align = "c", col.names = c("Variable", "Frequence"))
+
+```
+## Accuracy metric: training and fitting the models
+
+By using the CARET package, we need some paramaters first to train our models. It will be used for each model with accuracy metric.
+
+As mentioned before, we will use a five cross-validation to subset the training set (into a validation set) in order to asses how well the model will generalize to the test set.  
+
+```{r}
+train_control <- trainControl(method = "cv", number = 5)
+metric <- "Accuracy"
+```
+
+
+### Logistic regression 
+
+A logistic regression is a binary classifier and is used here for output with two classes.
+
+We will use the AIC selection in order to have a model with more significant variables.
+
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+set.seed(123)
+
+fit_glm_AIC = train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  method = "glmStepAIC",
+  metric = metric,
+  family = "binomial"
+)
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_glm_aic <- predict(fit_glm_AIC, newdata = german.te)
+cm_glm_aic <- confusionMatrix(data = pred_glm_aic, reference = german.te$risk)
+draw_confusion_matrix(cm_glm_aic)
+
+```
+
+By analysing more precisely our model, we observe that our model contains insignificant variables according to the p-valus. We decided to remove them from the model. 
+
+```{r message = FALSE, warning = FALSE}
+#Using a function to have a good layout for the significance of our parameters
+pval_star <- function(p, cutoffs = c(0.05, 0.01, 0.001)) {
+  stopifnot(length(cutoffs) == 3)
+  if (length(p) > 1) {
+    sapply(p, pval_star, cutoffs = cutoffs)
+  }
+  else {
+    ifelse(p > cutoffs[1], "", ifelse(p > cutoffs[2],
+      " *",
+      ifelse(p > cutoffs[3],
+        " **",
+        " ***"
+      )
+    ))
+  }
+}
+
+pvalues<- fit_glm_AIC$finalModel
+pvalues %>% tidy() %>%
+  select(-statistic) %>%
+  mutate(p.value = paste(round(p.value, 4), pval_star(p.value))) %>%
+  kable(digits = 3,
+    col.names = c("Parameter", "Estimate", "Standard Error", "P.value")
+  ) %>%
+  kable_styling(bootstrap_options = "striped")
+
+```
+
+The logistic regression has no parameter to tune unlike other models that we will use. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#Logistic regression
+set.seed(123)
+
+fit_glm_AIC = train(
+  form = risk ~ chk_acct + history + used_car + education + sav_acct + employment + male_single +
+  prop_unkn_none + rent + job + foreign + Log1pDurationstd,
+  data = german.tr.bal,
+  trControl = train_control,
+  method = "glmStepAIC",
+  metric = metric,
+  family = "binomial"
+)
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_glm_aic <- predict(fit_glm_AIC, newdata = german.te)
+cm_glm_aic <- confusionMatrix(data = pred_glm_aic, reference = german.te$risk)
+draw_confusion_matrix(cm_glm_aic)
+
+```
+Even if our final model has decreased in accuracy, the gab between sensitivity and specificity is smaller. Moreover, because we removed insignificant variables, our model makes more sense. 
+
+Finally, we compute the VIF coefficients to look for multicollineratity which is not the case as we can see below (VIF coefficients <5).
+
+```{r message = FALSE, warning = FALSE}
+vif(pvalues) %>% kable(col.names = "VIF Coefficient") %>%  kable_styling(bootstrap_options = "striped")
+```
+
+
+### Nearest neighbour classification
+
+The K-NN model compute the distance between observations in order to classify them. It means that the model counts the classes of the K nearest instances and the class with the most observations is selected for the K observations. 
+
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#KNN
+set.seed(456)
+fit_knn_tuned = train(
+  risk ~ .,
+  data = german.tr.bal,
+  method = "knn",
+  metric = metric,
+  trControl = train_control,
+  tuneGrid = expand.grid(k = seq(1, 101, by = 1))
+)
+
+```
+
+We are looking for the optimal K.
+
+```{r message = FALSE, warning = FALSE}
+plot(fit_knn_tuned)
+
+
+K <- fit_knn_tuned$finalModel$k
+paste("The optimal K of our model is", K) %>% kable(col.names = NULL, align = "l")
+# K %>% kable(col.names = "K", align = "c")
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_knn <- predict(fit_knn_tuned, newdata = german.te)
+cmknn <- confusionMatrix(data = pred_knn, reference = german.te$risk)
+draw_confusion_matrix(cmknn)
+```
+
+
+### Support Vector Machine (SVM)
+
+The model, considered as a separation method, consists in looking for the linear optimal separation of the hyperplane in order to classify the observations. 
+
+With the CARET package, we can only tune the cost hyperparameter. The cost controls the tolerance to bad classification and corresponds to the smoothing of the border that classifies the observations. The larger is the cost (border is not smooth), the fewer missclassifications are allowed. If the cost is too large, it can lead to overfitting. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#SVM
+hp_svm <- expand.grid(cost = 10 ^ ((-2):1))
+set.seed(1953)
+fit_svm <- train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  tuneGrid = hp_svm,
+  method = "svmLinear2",
+  metric = metric
+)
+```
+
+
+```{r}
+C <- fit_svm$finalModel$cost
+paste("The optimal cost for our model is", C) %>% kable(col.names = NULL, align="l")
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_svm <- predict(fit_svm, newdata = german.te)
+cmsvm <- confusionMatrix(data = pred_svm, reference = german.te$risk)
+draw_confusion_matrix(cmsvm)
+```
+
+### Neural network
+
+A neural network combines several predictions of small nodes and contains lots of coefficients (weights) and parameters to tune. Neural networks are over-parametrized by nature and therefore, the solution is quite unstable. In order to avoid overfitting, we will use a weight decay to penalise the largest weights. We will also tune the size of the neural networks to find the opimal one. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#Neural network
+hp_nn <- expand.grid(size = 2:10,
+                     decay = seq(0, 0.5, 0.05))
+set.seed(2006)
+fit_nn <- train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  tuneGrid = hp_nn,
+  method = "nnet",
+  metric = metric
+)
+```
+
+Below, we display our neural network.
+
+```{r message = FALSE, warning = FALSE, fig.height= 15, fig.width=15}
+plotnet(fit_nn$finalModel)
+
+decay <- fit_nn$finalModel$decay
+paste("The best neural networs has a decay of", decay) %>% kable(col.names = NULL, align="l")
+
+
+arch<- fit_nn$finalModel$n
+cat("The model architecture is the following:","\n", "- Number of layers =", length(arch), "\n", 
+      "- Nodes in the first layer =", arch[1], "\n",
+      "- Nodes in the second layer =", arch[2], "\n",
+      "- Nodes in the third layer (output) =", arch[3]) %>% kable(col.names = NULL, align="l")
+
+
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_nn <- predict(fit_nn, newdata = german.te)
+cmnn <- confusionMatrix(data = pred_nn, reference = german.te$risk)
+draw_confusion_matrix(cmnn)
+```
+
+### Linear discriminant analysis (LDA)
+
+The aim of the linear discriminant analysis is to explain and predict the class of an observation according to a linear combination of features that characterizes the classes.
+
+There is no tunige parameter for this model. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#LDA
+set.seed(1839)
+fit_LDA <- train(risk ~ .,
+                 data = german.tr.bal,
+                 method = "lda",
+                 metric = metric,
+                 trControl = train_control)
+
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_lda <- predict(fit_LDA, newdata = german.te)
+cmlda <- confusionMatrix(data = pred_lda, reference = german.te$risk)
+draw_confusion_matrix(cmlda)
+```
+
+### Random Forest
+
+A random forest model is composed by a multitude of decision trees forming a whole. Each individual tree predicts a class and the class receiving the most votes becomes the prediction model. Thus, the predictions of the individual trees are averaged to get a final prediction. The trees are uncorrelated and operate as a set. Therefore they outperform the individual models. The non-correlation between trees brings some stability to the final prediction.
+
+To tune the model, we will play around the number of trees composing the random forest.
+
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#Random forest 
+hp_rf <- expand.grid(.mtry = (1:15)) 
+set.seed(531)
+fit_rf <- train(
+  risk ~ .,
+  data = german.tr.bal,
+  method = 'rf',
+  metric = metric,
+  trControl = train_control,
+  tuneGrid = hp_rf
+)
+```
+
+Here, we display the importance of the variable. 
+
+```{r message = FALSE, warning = FALSE}
+varImp(fit_rf) %>% plot()
+```
+
+
+
+```{r message = FALSE, warning = FALSE}
+ntree <- fit_rf$finalModel$mtry
+paste("Our random forest model is composed by", ntree, "trees") %>% kable(col.names = NULL, align="l")
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_rf <- predict(fit_rf, newdata = german.te)
+cmrf <- confusionMatrix(data = pred_rf, reference = german.te$risk)
+draw_confusion_matrix(cmrf)
+```
+
+### Decision tree
+
+A tree is a graphical representation of a set of rules. The importance of characteristics is clear and relationships can be interpreted.
+
+For the decision tree model, we decided to tune the complexity parameter "cp" to be in the range 0.03 and 0.
+
+The complexity parameter control the optimal size of the tree. If the cost of adding another variable to the tree from the current node is above the value of the complexity parameter, we stop growing the tree. Therefore, the complexity parameter is the minimum improvement needed in the model at each node. 
+
+Because we use the CARET package, we do not need to prune the tree as the tree is already simplified. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#Decision tree
+hp_ct <- expand.grid(cp = seq(from = 0.03, to = 0, by = -0.003))
+set.seed(1851) #allow repoducibility of the results
+fit_ct <- train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  tuneGrid = hp_ct,
+  method = "rpart",
+  metric = metric
+)
+```
+
+Below, we diplay our final tree. The most important variable is the first used to build the tree. For our tree, the most important variable is "chk_acct" which corresponds to the checking account status. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE}
+fancyRpartPlot(fit_ct$finalModel, main = "Regression tree", caption = NULL)
+```
+
+The confusion matrix demonstrates that sensitivity and specificity are well balanced.
+
+```{r message = FALSE, warning = FALSE}
+pred_ct <- predict(fit_ct, newdata = german.te)
+
+cmct <- confusionMatrix(data = pred_ct, reference = german.te$risk)
+draw_confusion_matrix(cmct)
+```
+
+### Naive Bayes
+
+
+Naive Bayes model uses a probabilistic approach and allows an interpretation of the features.
+
+The aime is to predict the class of an instance by choosing the class that maximizes the conditional probability given the features. 
+
+In order to find the optimal model, we will try to use or not use the kernel density and we will set the laplace smoother value to zero. In addition, the adjust parameter will allow us to adjust the bandwidth of the kernel density. The larger is the number, the more flexible is the density estimate. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#Naive Bayes
+hp_nb <- expand.grid(
+  usekernel = c(TRUE, FALSE),
+  laplace = 0,
+  adjust = seq(from = 0.1, to = 5, by = 0.5)
+)
+
+set.seed(2013)
+fit_nb <- train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  tuneGrid = hp_nb,
+  method = "naive_bayes",
+  metric = metric
+)
+```
+
+Our best model uses kernel density as we can see on the following graph.
+
+
+```{r message = FALSE, warning = FALSE}
+plot(fit_nb)
+```
+
+
+```{r message = FALSE, warning = FALSE}
+pred_nb <- predict(fit_nb, newdata = german.te)
+cmnb <- confusionMatrix(data = pred_nb, reference = german.te$risk)
+draw_confusion_matrix(cmnb)
+```
+
+
+**Recapitulations of the accuracy results**
+
+```{r message = FALSE, warning = FALSE}
+accuracy<- c(
+
+confusionMatrix(predict.train(fit_glm_AIC, newdata = german.te),
+german.te$risk)$overall[1],
+confusionMatrix(predict.train(fit_nb, newdata = german.te),
+german.te$risk)$overall[1],
+confusionMatrix(predict.train(fit_nn, newdata = german.te),
+german.te$risk)$overall[1],
+confusionMatrix(predict.train(fit_rf, newdata = german.te),
+german.te$risk)$overall[1],
+confusionMatrix(predict.train(fit_svm, newdata = german.te),
+german.te$risk)$overall[1], 
+confusionMatrix(predict.train(fit_LDA, newdata = german.te),
+german.te$risk)$overall[1], 
+confusionMatrix(predict.train(fit_ct, newdata = german.te),
+german.te$risk)$overall[1], 
+confusionMatrix(predict.train(fit_knn_tuned, newdata = german.te),
+german.te$risk)$overall[1]
+)
+
+model<- c("fit_glm_AIC", "fit_nb", "fit_nn", "fit_rf", "fit_svm", "fit_LDA", "fit_ct", "fit_knn_tuned")
+
+results<- tibble(accuracy, model) %>% arrange(desc(accuracy))
+
+results %>% kable() %>% kable_styling()
+
+best <-
+results %>% 
+  slice_max(accuracy)
+  
+
+paste("According to the accuracy, the best model is", best$model,"with" ,"accuracy =", round(best$accuracy, digits = 4)) %>% kable(col.names = NULL, align="l")
+
+```
+
+
+## ROC metric: training and fitting the models 
+
+In this part, we reproduce the same models as before but instead of the accuracy, we will use the ROC metric to evaluate the models and the Leave-One-Out Cross-Validation (LOOCV) method to assess the tuned hyperparameters.
+
+```{r message = FALSE, warning = FALSE, results=FALSE}
+train_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              summaryFunction = twoClassSummary)
+
+metric <- "ROC"
+```
+
+We first train the model on the training set, then we make the predictions on the test set. 
+
+```{r message = FALSE, warning = FALSE, results=FALSE, cache=TRUE}
+#Logistic regression
+set.seed(123)
+fit_glm_AIC = train(
+  form = risk ~ chk_acct + history + used_car + education + sav_acct + employment + male_single +    prop_unkn_none + rent + job + foreign + Log1pDurationstd,
+  data = german.tr.bal,
+  trControl = train_control,
+  method = "glmStepAIC",
+  metric = metric,
+  family = "binomial"
+)
+
+
+#KNN
+set.seed(456)
+fit_knn_tuned = train(
+    risk ~ .,
+    data = german.tr.bal,
+    method = "knn",
+    metric = metric,
+    trControl = train_control,
+    tuneGrid = expand.grid(k = seq(1, 101, by = 1))
+)
+
+#SVM
+hp_svm <- expand.grid(cost = 10 ^ ((-2):1))
+set.seed(1953)
+fit_svm <- train(
+    form = risk ~ .,
+    data = german.tr.bal,
+    trControl = train_control,
+    tuneGrid = hp_svm,
+    method = "svmLinear2",
+    metric = metric
+)
+
+#Neural network
+hp_nn <- expand.grid(size = 2:10,
+                     decay = seq(0, 0.5, 0.05))
+set.seed(2006)
+fit_nn <- train(
+    form = risk ~ .,
+    data = german.tr.bal,
+    trControl = train_control,
+    tuneGrid = hp_nn,
+    method = "nnet",
+    metric = metric
+)
+
+#Discriminant analysis
+set.seed(1839)
+fit_LDA <- train(risk ~ .,
+                 data = german.tr.bal,
+                 method = "lda",
+                 metric = metric,
+                 trControl = train_control)
+
+#Random forest 
+hp_rf <- expand.grid(.mtry = (1:15)) 
+set.seed(531)
+fit_rf <- train(
+    risk ~ .,
+    data = german.tr.bal,
+    method = 'rf',
+      tuneGrid = hp_rf,
+    metric = metric,
+    trControl = train_control
+    )
+
+#Decision tree 
+hp_ct <- expand.grid(cp = seq(from = 0.03, to = 0, by = -0.003))
+set.seed(1851)
+fit_ct <- train(
+    form = risk ~ .,
+    data = german.tr.bal,
+    trControl = train_control,
+    tuneGrid = hp_ct,
+    method = "rpart",
+    metric = metric
+)
+
+#Naive Bayes
+hp_nb <- expand.grid(
+    usekernel = c(TRUE, FALSE),
+    laplace = 0,
+    adjust = seq(from = 0.1, to = 5, by = 0.5)
+)
+
+set.seed(2013)
+fit_nb <- train(
+    form = risk ~ .,
+    data = german.tr.bal,
+    trControl = train_control,
+    tuneGrid = hp_nb,
+    method = "naive_bayes",
+    metric = metric
+)
+```
+
+```{r message = FALSE, warning = FALSE}
+pred_glm_AIC_roc <- predict(fit_glm_AIC, newdata = german.te, type="prob")
+pred_knn_tuned_roc <- predict(fit_knn_tuned, newdata = german.te, type="prob")
+pred_svm_roc <- predict(fit_svm, newdata = german.te, type="prob")
+pred_nn_roc <- predict(fit_nn, newdata = german.te, type="prob")
+pred_lda_roc <- predict(fit_LDA, newdata = german.te, type="prob")
+pred_rf_roc <- predict(fit_rf, newdata = german.te, type="prob")
+pred_ct_roc <- predict(fit_ct, newdata = german.te, type="prob")
+pred_nb_roc <- predict(fit_nb, newdata = german.te, type="prob")
+```
+
+
+**Recapitulations of the ROC results**
+
+We plot the ROC curve, which is simply a plot of the values of sensitivity against one minus specificity, as the value of the cut-point c is increased from 0 through to 1. A perfect model would predict perfectly the (sensitivity), i.e. reaching 100% of correct answer. At the same time, it would make no mistake for predicting negative answers (1-specificity).
+As a result, a perfect model would reach the upper left corner of our ROC graph. It means that we can estimate the model quality by computing the area of the ROC curve above the purely random model represented by the straight line. If this area is high, we have a good discrimination level. The area takes value between 0.5 and 1. A value above 0.8 would be
+considered as a good level.
+
+```{r message = FALSE, warning = FALSE}
+#List of predictions
+preds_list <- list(
+    pred_glm_AIC_roc[,2],
+    pred_knn_tuned_roc[,2],
+    pred_svm_roc[,2],
+    pred_nn_roc[,2],
+    pred_lda_roc[,2],
+    pred_rf_roc[,2], 
+    pred_ct_roc[,2],
+    pred_nb_roc[,2])
+#List of actual values (same for all)
+m <- length(preds_list)
+actuals_list <- rep(list(german.te$risk), m)
+
+#Plot the ROC curves
+pred <- prediction(preds_list, actuals_list)
+rocs <- performance(pred, "tpr", "fpr")
+plot(rocs, col = as.list(1:m), main = "Test Set ROC Curves") %>% legend(x = "bottomright", 
+       legend = c("glm_AIC", "knn_tuned", "svm", "nn", "lda", "rf","ct", "nb"),
+       fill = 1:m) %>% abline(coef = c(0,1)) 
+
+
+auc <- performance(pred, measure = "auc")
+auc <- auc@y.values
+auc<- tibble(auc)
+auc$model <- c("glm_AIC", "knn_tuned", "svm", "nn", "lda", "rf","ct", "nb")
+results_auc <- as.data.frame(lapply(auc, unlist))
+results_auc <- results_auc %>% arrange(desc(auc))
+results_auc %>% kable() %>% kable_styling()
+
+best_auc <-
+results_auc %>% 
+  slice_max(auc)
+
+paste("According to the AUC, the best model is", best_auc$model, "with AUC =", round(best_auc$auc, digits = 4)) %>% kable(col.names = NULL, align="l")
+
+```
+
+
+Remarques du prof: corriger les valeurs abérrantes, déterminer les outliers (ne pas les enlever car cela ne résulte pas d'erreurs apparentes), faire les boxplots pour savoir quelles variables pourraient être incluses dans notre modèle, Expliquers sensitivity et specificity, faire d'autres modèles. 
+
+
+DALEX
+
+```{r}
+
+library(DALEX)
+
+
+#residuals for glm
+resids_glm_AIC <- model_performance(explainer_glm_AIC)
+
+vip_glm_AIC <- variable_importance(explainer_glm_AIC, loss_function = loss_root_mean_square) 
+
+
+
+#training
+set.seed(123)
+
+fit_glm_AIC = train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  method = "glmStepAIC",
+  metric = metric,
+  family = "binomial"
+)
+
+
+y_numeric <- as.numeric(german.tr.bal$risk) -1
+
+explainer_glm_AIC <- explain(fit_glm_AIC, data = german[,-28], y = y_numeric)
+
+summary(explainer_glm_AIC)
+
+#importance variable
+vip_glm_AIC <- variable_importance(explainer_glm_AIC, loss_function = loss_root_mean_square) 
+plot(vip_glm_AIC)
+summary(vip_glm_AIC)
+
+#residuals for glm
+resids_glm_AIC <- model_performance(explainer_glm_AIC)
+
+
+#Dessous j'ai essayé autrement mais c'est faux, à corriger
+#prediction
+    custom_predict <- function(fit_glm_AIC, german.te) {
+       predict(fit_glm_AIC, german.te)$predictions
+    }
+    explainer_glm_AIC <- explain(fit_glm_AIC, data = german.tr.bal, y = german.tr.bal$risk,
+                              predict_function = custom_predict)
+    
+    summary(explainer_glm_AIC)
+
+
+
+#residuals 
+custom_residual <- function(fit_glm_AIC, german.te, y, predict_function) {
+       abs(y - predict_function(fit_glm_AIC, german.te))
+    }
+    aps_glm_AIC_exp <- explain(fit_glm_AIC, data = german.tr.bal,
+                              y = german.tr.bal$risk,residual_function = custom_residual)
+    
+summary(aps_glm_AIC_exp)
+    
+    
+```
+
+
+<!--chapter:end:I_part_Analysis.Rmd-->
+
+
+```{r include=FALSE}
+#install.packages(c("DALEX", "breakDown", "ceterisParibus", "live", "randomForest", "auditor"))
+library(DALEX)
+library(breakDown)
+library(ceterisParibus)
+library(live)
+library(randomForest)
+library(auditor)
+library(here)
+library(tidyverse)
+library(inspectdf)
+library(DataExplorer)
+library(GGally)
+library(DT)
+library(gridExtra)
+require(ggplot2)
+library(caret)
+library(broom)
+library(kableExtra)
+library(car)
+library(ROCR)
+library(modelr)
+library(RColorBrewer)
+library(rattle)
+library(NeuralNetTools)
+#DALEX
+library(DALEX)
+library(e1071)
+library(kknn)
+library(rsample)
+library(dplyr)
+
+german<- read.csv("Data/GermanCredit.csv", sep = ";")
+#Renaming OBS. in OBS
+colnames(german)[1] <- "OBS"
+
+#Col names in lower case 
+colnames(german) <- tolower(colnames(german))
+
+
+#Creating a new variable in order to know if credit risk is good  (1) or bad (0)
+german$risk <- ifelse(german$response == 1, "good", "bad")
+german <- german %>% select(-response)
+german$risk <- as.factor(german$risk)
+
+
+
+#data cleaning
+german$age[537] <-75 
+german$education [37] <- 1
+german$guarantor [234] <- 1
+
+```
+
+
+```{r include=FALSE}
+# #Here, we rename the variable history
+# german$history <- factor(german$history, levels = 0:4, labels=c("no credits taken", 
+#     " all credits at this bank paid back duly", 
+#     "existing credits paidback duly till now",
+#     "delay in paying off in the past",
+#     "critical account"))
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#First we tried to scale the data to normalize them 
+german <- german %>% mutate(LogAge = log(age),
+                    Log1pAmount = log1p(amount), 
+                    Log1pDuration = log1p(duration))
+
+german$LogAgestd <- scale(german$LogAge) %>% as.numeric()
+german$Log1pAmountstd <- scale(german$Log1pAmount) %>%  as.numeric()
+german$Log1pDurationstd <- scale(german$Log1pDuration) %>% as.numeric()
+
+
+german <- german %>% select(-age, -amount, -obs, -duration, -LogAge, -Log1pAmount, -Log1pDuration) 
+
+
+#Splitting the dataset into a training (80%) and a test set (20%)
+set.seed(245156)
+index <- sample(x=1:2, size = nrow(german), replace = TRUE, prob = c(0.8, 0.2))
+german.tr <- german[index == 1,]
+german.te <- german[index == 2,]
+table_tr <- table(german.tr$risk)
+table_te <- table(german.te$risk)
+accuracy <- table_te["1"]/sum(table_te) #% of reponses = good in data set
+```
+
+Below, we display the number of bad and good credits after having balanced the training set. 
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#Balancing the data 
+# summary(german.tr)
+n.bad <- sum(german.tr$risk == "bad")
+n.good <- sum(german.tr$risk == "good")
+
+set.seed(245156)
+index.bad <- which(german.tr$risk == "bad")
+index.good <- sample(x = which(german.tr$risk == "good"), size = n.bad, replace = FALSE)
+
+german.tr.bal <- german.tr[c(index.bad, index.good),]
+
+table(german.tr.bal$risk) %>% kable(align = "c", col.names = c("Variable", "Frequence"))
+```
+
+
+# DALEX
+
+This method will help us to better understand the models that we are using. Some models used in the previous part were complex. Accuracy and ROC are therefore not enough to really know what is going on behind the model. For us it is difficult to choose among all the models. Indeed they have very similar accuracy and ROC. 
+
+This will bring us new knowledge on the database and on the importance and behavior of certain variables. We will have more confidence in our models. 
+
+We decided to explain the following models: 
+
+- Random forest 
+- Logistic regression
+- Nearest neighbour classification (KNN)
+- Linear discriminant analysis (LDA)
+- Neural network 
+
+The analysis using the DALEX method is carried out in four phases:
+
+- Training the models with metric set as "accuracy"
+- Prepare an explainer
+- Dataset level
+- Instance level
+
+## Training the models
+
+This part consists in creating the models we are going to compare. To do this, we base ourselves on existing models from previous part.
+
+```{r include=FALSE}
+train_control <- trainControl(method = "cv", number = 5)
+metric <- "Accuracy"
+
+#random forest model
+hp_rf <- expand.grid(.mtry = (1:15)) 
+set.seed(531)
+fit_rf <- train(
+  risk ~ .,
+  data = german.tr.bal,
+  method = 'rf',
+  metric = metric,
+  trControl = train_control,
+  tuneGrid = hp_rf 
+)
+
+#glm model
+set.seed(123)
+fit_glm_AIC = train(
+  form = risk ~ chk_acct + history + used_car + education + sav_acct + employment + male_single +
+  prop_unkn_none + rent + job + foreign + Log1pDurationstd,
+  data = german.tr.bal,
+  trControl = train_control,
+  method = "glmStepAIC",
+  metric = metric,
+  family = "binomial"
+)
+
+#knn model
+set.seed(456)
+fit_knn_tuned = train(
+  risk ~ .,
+  data = german.tr.bal,
+  method = "knn",
+  metric = metric,
+  trControl = train_control,
+  tuneGrid = expand.grid(k = seq(1, 101, by = 1))
+)
+
+#LDA
+set.seed(1839)
+fit_LDA <- train(risk ~ .,
+                 data = german.tr.bal,
+                 method = "lda",
+                 metric = metric,
+                 trControl = train_control)
+
+#Neural network
+hp_nn <- expand.grid(size = 2:10,
+                     decay = seq(0, 0.5, 0.05))
+set.seed(2006)
+fit_nn <- train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  tuneGrid = hp_nn,
+  method = "nnet",
+  metric = metric
+)
+
+```
+
+## Create an explainer
+
+```{r echo = T,results = "hide"}
+
+
+# yTest <- as.numeric(as.factor(german.te$risk))-1 #Create a vectore of the predictions 
+
+#transform the variable to predict into numeric values
+german.te <- transform(german.te, risk=as.numeric(as.factor(german.te$risk))-1) 
+
+#random forest model
+explainer_rf <- DALEX::explain(fit_rf,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "Random Forest")
+
+#glm model
+explainer_glm <- DALEX::explain(fit_glm_AIC,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "Logistic regression")
+
+#knn model
+explainer_knn <- DALEX::explain(fit_knn_tuned,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "KNN")
+
+#lda model
+explainer_lda <- DALEX::explain(fit_LDA,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "LDA")
+
+#nn model
+explainer_nn <- DALEX::explain(fit_nn,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "Neural network")
+
+```
+
+## Dataset level
+
+Here, we will analyze the predictions with a dataset level. 
+
+### Model performance and model diagnostic
+
+Because we already computed the accuracy and the ROC of each model in the previous part, we will not reproduce the results here. We will rather display the distributions of the residuals. Usually, in a good model residuals deviate randomly form zero. Therefore, we should observe a symmetric distribution around zero (mean = 0). In addition, we want to limit the variability of residuals in our models, therefore we aim to have residuals close to zero.
+
+#### Distribution of the residuals
+
+```{r}
+#random forest model
+rf_hist <- DALEX::model_performance(explainer_rf) 
+
+#glm model
+glm_hist <- DALEX::model_performance(explainer_glm) 
+
+
+#knn model
+knn_hist <- DALEX::model_performance(explainer_knn) 
+
+
+#lda model
+lda_hist <- DALEX::model_performance(explainer_lda) 
+
+#neural network model 
+nn_hist <- DALEX::model_performance(explainer_nn) 
+
+
+plot(rf_hist, glm_hist, knn_hist, lda_hist, nn_hist, geom = "histogram")
+```
+In the histograms, we can see that KNN, LDA  and ranfom forest models have residuals closer to zero than for the logistic regression and the neural network model.  Residuals are also randomly distributed. We have a bimodal distribution as we want to classify the observations between two groups (good credit and bad credit). The bimodal distribution is more evident for the logistic regression and the neural network. The distribution of the LDA, KNN and random forest is more spreaded than for logistic regression and neural network. 
+
+Overall, the residual distribution of our models is a bit skewed to the right.
+
+```{r}
+rf_bp <- DALEX::model_performance(explainer_rf) 
+glm_bp <- DALEX::model_performance(explainer_glm) 
+knn_bp <- DALEX::model_performance(explainer_knn) 
+lda_bp <- DALEX::model_performance(explainer_lda) 
+nn_bp <- DALEX::model_performance(explainer_nn) 
+
+
+plot(rf_bp, glm_bp, knn_bp, lda_bp, nn_bp, geom = "boxplot")
+```
+The box-and-whisker plots of the residuals confirm the results and show that LDA residuals are more frequently close to zero with neural network but also more spreaded. 
+
+**Residuals and observed values**
+
+A perfect predictive model would have residuals on the horizontal line. But, a good model has residuals around the horizontal line showing random deviations between observed and predicted values.
+
+Here, we see again that KNN and random forest models have less values of residuals close to zero  unlike other models.
+
+```{r}
+rfdiag <- explainer_rf %>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+glmdiag <- explainer_glm %>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+knndiag <- explainer_knn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+ldadiag <- explainer_lda%>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+nndiag <- explainer_nn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+
+grid.arrange(rfdiag, glmdiag, knndiag, ldadiag, nndiag, nrow = 2)
+
+```
+
+
+**Predicted and observed values**
+
+Below, we display the predicted values versus the observed ones. 
+
+```{r}
+
+rfdiag1 <- explainer_rf %>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE) 
+glmdiag1 <- explainer_glm %>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE) 
+knndiag1 <- explainer_knn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE)
+ldadiag1 <- explainer_lda%>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE)
+nndiag1 <- explainer_nn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE)
+
+grid.arrange(rfdiag1, glmdiag1, knndiag1,ldadiag1, nndiag1, nrow = 2)
+
+```
+
+
+**Index of residuals**
+
+We do not see any pattern among residuals which show that residuals as randomly distributed around zero. Again, we remark that KNN model have less residual values around zero which is not really good.  
+
+```{r}
+rfdiag2 <- explainer_rf %>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+glmdiag2 <- explainer_glm %>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+knndiag2 <- explainer_knn%>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+ldadiag2 <- explainer_lda%>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+nndiag2 <- explainer_nn%>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+
+grid.arrange(rfdiag2, glmdiag2, knndiag2, ldadiag2, nndiag2, nrow = 2)
+
+
+```
+
+
+### Model parts 
+
+This part is essential the importance ouf our variables in our models. We will use the six most important variables of each model and analyze them. 
+
+#### Random forest model 
+
+```{r}
+explainer_rf %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+
+In our random forest model, the six most important variables are :
+
+- chk_acct
+- Log1pDurationstd
+- history
+- sav_acct
+- Log1pAmountstd
+- guarantor
+
+#### Logistic regression model 
+
+```{r}
+explainer_glm %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+
+For the logistic regression, the most important variables are the following: 
+
+- chk_acct
+- history
+- Log1pDurationstd
+- sav_acct
+- education
+- used_car
+
+#### Nearest neighbour classification (KNN)
+
+```{r}
+explainer_knn %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+
+For the KNN model: 
+
+- chk_acct
+- Log1pDurationstd
+- sav_acct
+- history
+- LogAgestd
+- Log1pAmountstd
+
+
+#### Linear discriminant analysis (LDA)
+
+```{r}
+explainer_lda %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+For LDA: 
+
+- chk_acct
+- history
+- Log1pDurationstd
+- sav_acct
+- guarantor
+- used_car
+
+#### Neural network
+
+```{r}
+explainer_nn %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+For neural network: 
+
+- chk_acct
+- Log1pDurationstd
+- history
+- sav_acct
+- Log1pAmountstd
+- install_rate
+
+### Model profile 
+
+In this part, we look for the profil of the important numerical variables of each model. 
+
+#### Random forest model 
+
+```{r}
+#numerical variables 
+model_profile_rf1 <- model_profile(explainer_rf, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "guarantor"))
+
+plot(model_profile_rf1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "guarantor")) + ggtitle("Partial dependence profile ", "")
+
+
+```
+
+The more your have money on the savings account, the more likely you will be classified as a good credit. It is the same trend for the checking account variable. Reciprocally, the longer the log credit period increases (Log1pDurationstd), the less likely the customer will be defined as good credit. 
+
+
+#### Logistic regression model 
+
+```{r}
+#numerical variables
+model_profile_glm1 <- model_profile(explainer_glm, type = "partial", variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history", "education", "used_car"))
+
+plot(model_profile_glm1, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history", "education", "used_car"))  + ggtitle("Partial dependence profile ", "")
+
+
+```
+
+The longer is the employment period of a customer, the less risky he is for a credit. Here, we can see with history variable that the more critical is the account, the more likely is the classification as good credit risk which is quite note realistic. Also, if the customer have no education, he is more likely to be classified as a good credit risk. 
+
+
+#### Nearest neighbour classification (KNN)
+
+```{r}
+model_profile_knn1 <- model_profile(explainer_knn, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "LogAgestd"))
+
+plot(model_profile_knn1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "LogAgestd")) + ggtitle("Partial dependence profile ", "")
+```
+
+The relationship of sav_acct and chk_acct is even stronger with KNN model. 
+
+#### Linear discriminant analysis (LDA)
+
+
+```{r}
+model_profile_knn1 <- model_profile(explainer_knn, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "guarantor", "used_car"))
+
+plot(model_profile_knn1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "guarantor", "used_car"))  + ggtitle("Partial dependence profile ", "")
+```
+
+With LDA, there is the same effect than with previous models. 
+
+#### Neural network 
+
+
+```{r}
+model_profile_knn1 <- model_profile(explainer_knn, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "install_rate"))
+
+plot(model_profile_knn1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "install_rate")) + ggtitle("Partial dependence profile ", "")
+```
+
+For the variable intall_rate, the more percentage of installment rate as percentage of disposable income, the less likely is to be classified as good credit risk.
+
+
+**Common important variables between models**
+
+- chk_acct
+- Log1pDurationstd
+- sav_acct
+- history
+
+```{r}
+#Compare model for common important variables 
+
+model_profile_rf_com <- model_profile(explainer_rf, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_glm_com <- model_profile(explainer_glm, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_knn_com <- model_profile(explainer_knn, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_lda_com <- model_profile(explainer_lda, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_nn_com <- model_profile(explainer_nn, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+
+plot(model_profile_rf_com, model_profile_glm_com, model_profile_knn_com, model_profile_lda_com, model_profile_nn_com, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history")) + ggtitle("Partial dependence profile", "")
+```
+
+The KNN model does not capture the effect of the Log1pDurationstd when predicting the model. Moreover, KNN seems to overestimate the effet of the history variable on the dependent variable and lda seems to underestimate it. Chk_acct and sav_acct effects  are well captured by each model. Therefore, they are very important variables to predict the good or bad credit.  
+
+
+
+## Instance level 
+
+```{r}
+#The instance we want to analyze (the 5th row)
+single_customer <- german[5,]
+```
+
+
+### Prediction parts 
+
+The break down profiles show the variations in the mean predictions. The plots are useful to assess the contribution of each variable to the prediction of the instance. Therefore, we look for changes in the predictions when values of variables are fixed. 
+
+Each explanatory variable is describing the instance we want to analyze. The following plots are summarizing the variations in the mean predictions when chk_acct is fixed to 0, male_single to 1, save_acct to 0, etc. 
+
+The intercept value corresponds to the mean value of predictions for the complete dataset. The following values show the changes in the mean prediction when values of variables are fixed. The prediction line in purple corresponds to the value of the prediction of the specific instance, it is the sum of the overall mean value and the variations. The green bars and the red ones show respectively the positive and the negative changes in the mean predictions. 
+
+
+#### Random forest model 
+
+```{r}
+#Random forest
+# explainer_rf %>% predict(single_customer)
+explainer_rf %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+Only the variable male_single has a positive variation in the mean prediction, while others have a negative variation. Chk_acct is the explanatory variable that influences the most the prediction of the instance. By fixing the chk_acct value to 0, we reduce the mean prediction.
+
+#### Logistic regression model 
+
+```{r}
+#Logistic regression
+# explainer_glm %>% predict(single_customer)
+explainer_glm %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+For the logistic regression, more variables have a positive variation on the mean prediction than in the random forest model. The variable chk_acct has the most negative change and influences the most the prediction. Besides chk_acct and prop_unkn_none, other variables have smaller effects on the mean prediction.  It could be because they are not important for the prediction or because they effect are closer to the mean of the prediction for this specific instance. 
+
+#### Nearest neighbour classification (KNN)
+
+```{r}
+#KNN
+# explainer_knn %>% predict(single_customer)
+explainer_knn %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+For the KNN model, we have more positive changes in the mean predicition, but chk_acct has still the most important variation, which is negative change again. 
+
+#### Linear discriminant analysis (LDA)
+
+```{r}
+#LDA
+explainer_lda %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+Here, sav_acct has less variation that in the KNN model.
+
+#### Neural network
+
+```{r}
+explainer_nn %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+Male_single and histors have important positive variations while chk_acct and sav_acct have large negative changes. 
+
+### Prediction profile
+
+Important variables have a curve with much variation. With the analyse of the profile, we know the role of each variable in the preciction of the instance.
+
+We display two plots for each model, one for numerical variables and another one for categorical ones. 
+
+The blue points on the following plots indicates the value of the predicton of the single instance. 
+
+#### Random forest model 
+
+
+```{r}
+explainer_rf %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "guarantor", "history", "Log1pAmountstd"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+```
+
+
+We remark that the profile for the random forest model is a step function. 
+
+Here, the higher is the average balance in savings (sav_acct), the richer is the customer and the most likely he will be classified as good credit. His predicted good credit risk probability will increase by more than 10% if he has more than 1000 DM on his savings account. 
+
+For our specific instance, if he has a guarantor, he will be most likely classified as a good credit. Here, the observed customer has no guarantor and he is classified as bad credit. 
+
+
+
+#### Logistic regression model 
+
+- chk_acct
+- history
+- Log1pDurationstd
+- sav_acct
+- education
+- used_car
+
+```{r}
+explainer_glm %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "history", "education", "used_car"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+
+```
+The profile of the logistic regression is smooth unlike for the random forest model. 
+
+The more time lasts the credit, the less likely the customer will be classified as a good credit risk.
+
+Here, the customer has no educations, therefore he is more likely to be classified as good credit which is strange. 
+
+#### Nearest neighbour classification (KNN)
+
+
+```{r}
+
+explainer_knn %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "Log1pAmountstd", "history", "LogAgestd"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+```
+
+For KNN, there is much more variability, curves are not smooth. Therefore it is more complicated to predict. The trend for the sav_acct is less obvious than in other models. 
+
+
+#### Linear discriminant analysis (LDA)
+
+```{r}
+
+explainer_lda %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "guarantor",
+    "used_car", "history"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+```
+
+The effect is really obvious for chk_acct, used_car and Log1pDurationstd.
+
+#### Neural network
+
+```{r}
+explainer_nn %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "install_rate",
+    "Log1pAmountstd", "history"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+
+```
+
+Curves have the shape of waves, especially for the Log1pDurationstd. It means that the variable predict a good credit risk between -2 and -1 then the trend is falling.
+
+**Common important variables between models**
+
+Here, we compare the profiles of the most important common variables in our models. 
+
+
+- chk_acct
+- Log1pDurationstd
+- sav_acct
+- history
+
+```{r}
+#Compare model for common important variables 
+predict_profile_rf <- predict_profile(explainer_rf, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_glm<- predict_profile(explainer_glm, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_knn <- predict_profile(explainer_knn, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_lda <- predict_profile(explainer_lda, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_nn <- predict_profile(explainer_nn, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+
+plot(predict_profile_rf, predict_profile_glm, predict_profile_knn, predict_profile_lda, predict_profile_nn, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history")) + ggtitle("Ceteris-paribus profile", "")
+```
+The effect of the variables is overestimated in KNN model. Or, all models besides KNN underestimate the effect in each variable. It can be both reasons.  
+
+
+
+
+
+<!--chapter:end:II_part_DALEX.Rmd-->
+

@@ -1,0 +1,699 @@
+
+```{r include=FALSE}
+#install.packages(c("DALEX", "breakDown", "ceterisParibus", "live", "randomForest", "auditor"))
+library(DALEX)
+library(breakDown)
+library(ceterisParibus)
+library(live)
+library(randomForest)
+library(auditor)
+library(here)
+library(tidyverse)
+library(inspectdf)
+library(DataExplorer)
+library(GGally)
+library(DT)
+library(gridExtra)
+require(ggplot2)
+library(caret)
+library(broom)
+library(kableExtra)
+library(car)
+library(ROCR)
+library(modelr)
+library(RColorBrewer)
+library(rattle)
+library(NeuralNetTools)
+#DALEX
+library(DALEX)
+library(e1071)
+library(kknn)
+library(rsample)
+library(dplyr)
+
+german<- read.csv("Data/GermanCredit.csv", sep = ";")
+#Renaming OBS. in OBS
+colnames(german)[1] <- "OBS"
+
+#Col names in lower case 
+colnames(german) <- tolower(colnames(german))
+
+
+#Creating a new variable in order to know if credit risk is good  (1) or bad (0)
+german$risk <- ifelse(german$response == 1, "good", "bad")
+german <- german %>% select(-response)
+german$risk <- as.factor(german$risk)
+
+
+
+#data cleaning
+german$age[537] <-75 
+german$education [37] <- 1
+german$guarantor [234] <- 1
+
+```
+
+
+```{r include=FALSE}
+# #Here, we rename the variable history
+# german$history <- factor(german$history, levels = 0:4, labels=c("no credits taken", 
+#     " all credits at this bank paid back duly", 
+#     "existing credits paidback duly till now",
+#     "delay in paying off in the past",
+#     "critical account"))
+```
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#First we tried to scale the data to normalize them 
+german <- german %>% mutate(LogAge = log(age),
+                    Log1pAmount = log1p(amount), 
+                    Log1pDuration = log1p(duration))
+
+german$LogAgestd <- scale(german$LogAge) %>% as.numeric()
+german$Log1pAmountstd <- scale(german$Log1pAmount) %>%  as.numeric()
+german$Log1pDurationstd <- scale(german$Log1pDuration) %>% as.numeric()
+
+
+german <- german %>% select(-age, -amount, -obs, -duration, -LogAge, -Log1pAmount, -Log1pDuration) 
+
+
+#Splitting the dataset into a training (80%) and a test set (20%)
+set.seed(245156)
+index <- sample(x=1:2, size = nrow(german), replace = TRUE, prob = c(0.8, 0.2))
+german.tr <- german[index == 1,]
+german.te <- german[index == 2,]
+table_tr <- table(german.tr$risk)
+table_te <- table(german.te$risk)
+accuracy <- table_te["1"]/sum(table_te) #% of reponses = good in data set
+```
+
+Below, we display the number of bad and good credits after having balanced the training set. 
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#Balancing the data 
+# summary(german.tr)
+n.bad <- sum(german.tr$risk == "bad")
+n.good <- sum(german.tr$risk == "good")
+
+set.seed(245156)
+index.bad <- which(german.tr$risk == "bad")
+index.good <- sample(x = which(german.tr$risk == "good"), size = n.bad, replace = FALSE)
+
+german.tr.bal <- german.tr[c(index.bad, index.good),]
+
+table(german.tr.bal$risk) %>% kable(align = "c", col.names = c("Variable", "Frequence"))
+```
+
+
+# DALEX
+
+This method will help us to better understand the models that we are using. Some models used in the previous part were complex. Accuracy and ROC are therefore not enough to really know what is going on behind the model. For us it is difficult to choose among all the models. Indeed they have very similar accuracy and ROC. 
+
+This will bring us new knowledge on the database and on the importance and behavior of certain variables. We will have more confidence in our models. 
+
+We decided to explain the following models: 
+
+- Random forest 
+- Logistic regression
+- Nearest neighbour classification (KNN)
+- Linear discriminant analysis (LDA)
+- Neural network 
+
+The analysis using the DALEX method is carried out in four phases:
+
+- Training the models with metric set as "accuracy"
+- Prepare an explainer
+- Dataset level
+- Instance level
+
+## Training the models
+
+This part consists in creating the models we are going to compare. To do this, we base ourselves on existing models from previous part.
+
+```{r include=FALSE}
+train_control <- trainControl(method = "cv", number = 5)
+metric <- "Accuracy"
+
+#random forest model
+hp_rf <- expand.grid(.mtry = (1:15)) 
+set.seed(531)
+fit_rf <- train(
+  risk ~ .,
+  data = german.tr.bal,
+  method = 'rf',
+  metric = metric,
+  trControl = train_control,
+  tuneGrid = hp_rf 
+)
+
+#glm model
+set.seed(123)
+fit_glm_AIC = train(
+  form = risk ~ chk_acct + history + used_car + education + sav_acct + employment + male_single +
+  prop_unkn_none + rent + job + foreign + Log1pDurationstd,
+  data = german.tr.bal,
+  trControl = train_control,
+  method = "glmStepAIC",
+  metric = metric,
+  family = "binomial"
+)
+
+#knn model
+set.seed(456)
+fit_knn_tuned = train(
+  risk ~ .,
+  data = german.tr.bal,
+  method = "knn",
+  metric = metric,
+  trControl = train_control,
+  tuneGrid = expand.grid(k = seq(1, 101, by = 1))
+)
+
+#LDA
+set.seed(1839)
+fit_LDA <- train(risk ~ .,
+                 data = german.tr.bal,
+                 method = "lda",
+                 metric = metric,
+                 trControl = train_control)
+
+#Neural network
+hp_nn <- expand.grid(size = 2:10,
+                     decay = seq(0, 0.5, 0.05))
+set.seed(2006)
+fit_nn <- train(
+  form = risk ~ .,
+  data = german.tr.bal,
+  trControl = train_control,
+  tuneGrid = hp_nn,
+  method = "nnet",
+  metric = metric
+)
+
+```
+
+## Create an explainer
+
+```{r echo = T,results = "hide"}
+
+
+# yTest <- as.numeric(as.factor(german.te$risk))-1 #Create a vectore of the predictions 
+
+#transform the variable to predict into numeric values
+german.te <- transform(german.te, risk=as.numeric(as.factor(german.te$risk))-1) 
+
+#random forest model
+explainer_rf <- DALEX::explain(fit_rf,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "Random Forest")
+
+#glm model
+explainer_glm <- DALEX::explain(fit_glm_AIC,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "Logistic regression")
+
+#knn model
+explainer_knn <- DALEX::explain(fit_knn_tuned,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "KNN")
+
+#lda model
+explainer_lda <- DALEX::explain(fit_LDA,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "LDA")
+
+#nn model
+explainer_nn <- DALEX::explain(fit_nn,
+                        data = german.te[,-28],
+                        y = german.te$risk, 
+                        label = "Neural network")
+
+```
+
+## Dataset level
+
+Here, we will analyze the predictions with a dataset level. 
+
+### Model performance and model diagnostic
+
+Because we already computed the accuracy and the ROC of each model in the previous part, we will not reproduce the results here. We will rather display the distributions of the residuals. Usually, in a good model residuals deviate randomly form zero. Therefore, we should observe a symmetric distribution around zero (mean = 0). In addition, we want to limit the variability of residuals in our models, therefore we aim to have residuals close to zero.
+
+#### Distribution of the residuals
+
+```{r}
+#random forest model
+rf_hist <- DALEX::model_performance(explainer_rf) 
+
+#glm model
+glm_hist <- DALEX::model_performance(explainer_glm) 
+
+
+#knn model
+knn_hist <- DALEX::model_performance(explainer_knn) 
+
+
+#lda model
+lda_hist <- DALEX::model_performance(explainer_lda) 
+
+#neural network model 
+nn_hist <- DALEX::model_performance(explainer_nn) 
+
+
+plot(rf_hist, glm_hist, knn_hist, lda_hist, nn_hist, geom = "histogram")
+```
+In the histograms, we can see that KNN, LDA  and ranfom forest models have residuals closer to zero than for the logistic regression and the neural network model.  Residuals are also randomly distributed. We have a bimodal distribution as we want to classify the observations between two groups (good credit and bad credit). The bimodal distribution is more evident for the logistic regression and the neural network. The distribution of the LDA, KNN and random forest is more spreaded than for logistic regression and neural network. 
+
+Overall, the residual distribution of our models is a bit skewed to the right.
+
+```{r}
+rf_bp <- DALEX::model_performance(explainer_rf) 
+glm_bp <- DALEX::model_performance(explainer_glm) 
+knn_bp <- DALEX::model_performance(explainer_knn) 
+lda_bp <- DALEX::model_performance(explainer_lda) 
+nn_bp <- DALEX::model_performance(explainer_nn) 
+
+
+plot(rf_bp, glm_bp, knn_bp, lda_bp, nn_bp, geom = "boxplot")
+```
+The box-and-whisker plots of the residuals confirm the results and show that LDA residuals are more frequently close to zero with neural network but also more spreaded. 
+
+**Residuals and observed values**
+
+A perfect predictive model would have residuals on the horizontal line. But, a good model has residuals around the horizontal line showing random deviations between observed and predicted values.
+
+Here, we see again that KNN and random forest models have less values of residuals close to zero  unlike other models.
+
+```{r}
+rfdiag <- explainer_rf %>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+glmdiag <- explainer_glm %>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+knndiag <- explainer_knn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+ldadiag <- explainer_lda%>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+nndiag <- explainer_nn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "residuals", smooth = FALSE)
+
+grid.arrange(rfdiag, glmdiag, knndiag, ldadiag, nndiag, nrow = 2)
+
+```
+
+
+**Predicted and observed values**
+
+Below, we display the predicted values versus the observed ones. 
+
+```{r}
+
+rfdiag1 <- explainer_rf %>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE) 
+glmdiag1 <- explainer_glm %>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE) 
+knndiag1 <- explainer_knn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE)
+ldadiag1 <- explainer_lda%>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE)
+nndiag1 <- explainer_nn%>% model_diagnostics() %>% plot(variable = "y", yvariable = "y_hat", smooth = FALSE)
+
+grid.arrange(rfdiag1, glmdiag1, knndiag1,ldadiag1, nndiag1, nrow = 2)
+
+```
+
+
+**Index of residuals**
+
+We do not see any pattern among residuals which show that residuals as randomly distributed around zero. Again, we remark that KNN model have less residual values around zero which is not really good.  
+
+```{r}
+rfdiag2 <- explainer_rf %>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+glmdiag2 <- explainer_glm %>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+knndiag2 <- explainer_knn%>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+ldadiag2 <- explainer_lda%>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+nndiag2 <- explainer_nn%>% model_diagnostics() %>% plot(variable = "ids", yvariable = "residuals", smooth = FALSE) 
+
+grid.arrange(rfdiag2, glmdiag2, knndiag2, ldadiag2, nndiag2, nrow = 2)
+
+
+```
+
+
+### Model parts 
+
+This part is essential the importance ouf our variables in our models. We will use the six most important variables of each model and analyze them. 
+
+#### Random forest model 
+
+```{r}
+explainer_rf %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+
+In our random forest model, the six most important variables are :
+
+- chk_acct
+- Log1pDurationstd
+- history
+- sav_acct
+- Log1pAmountstd
+- guarantor
+
+#### Logistic regression model 
+
+```{r}
+explainer_glm %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+
+For the logistic regression, the most important variables are the following: 
+
+- chk_acct
+- history
+- Log1pDurationstd
+- sav_acct
+- education
+- used_car
+
+#### Nearest neighbour classification (KNN)
+
+```{r}
+explainer_knn %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+
+For the KNN model: 
+
+- chk_acct
+- Log1pDurationstd
+- sav_acct
+- history
+- LogAgestd
+- Log1pAmountstd
+
+
+#### Linear discriminant analysis (LDA)
+
+```{r}
+explainer_lda %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+For LDA: 
+
+- chk_acct
+- history
+- Log1pDurationstd
+- sav_acct
+- guarantor
+- used_car
+
+#### Neural network
+
+```{r}
+explainer_nn %>% model_parts() %>% plot(show_boxplots = FALSE) + ggtitle("Feature Importance ", "")
+```
+For neural network: 
+
+- chk_acct
+- Log1pDurationstd
+- history
+- sav_acct
+- Log1pAmountstd
+- install_rate
+
+### Model profile 
+
+In this part, we look for the profil of the important numerical variables of each model. 
+
+#### Random forest model 
+
+```{r}
+#numerical variables 
+model_profile_rf1 <- model_profile(explainer_rf, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "guarantor"))
+
+plot(model_profile_rf1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "guarantor")) + ggtitle("Partial dependence profile ", "")
+
+
+```
+
+The more your have money on the savings account, the more likely you will be classified as a good credit. It is the same trend for the checking account variable. Reciprocally, the longer the log credit period increases (Log1pDurationstd), the less likely the customer will be defined as good credit. 
+
+
+#### Logistic regression model 
+
+```{r}
+#numerical variables
+model_profile_glm1 <- model_profile(explainer_glm, type = "partial", variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history", "education", "used_car"))
+
+plot(model_profile_glm1, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history", "education", "used_car"))  + ggtitle("Partial dependence profile ", "")
+
+
+```
+
+The longer is the employment period of a customer, the less risky he is for a credit. Here, we can see with history variable that the more critical is the account, the more likely is the classification as good credit risk which is quite note realistic. Also, if the customer have no education, he is more likely to be classified as a good credit risk. 
+
+
+#### Nearest neighbour classification (KNN)
+
+```{r}
+model_profile_knn1 <- model_profile(explainer_knn, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "LogAgestd"))
+
+plot(model_profile_knn1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "LogAgestd")) + ggtitle("Partial dependence profile ", "")
+```
+
+The relationship of sav_acct and chk_acct is even stronger with KNN model. 
+
+#### Linear discriminant analysis (LDA)
+
+
+```{r}
+model_profile_knn1 <- model_profile(explainer_knn, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "guarantor", "used_car"))
+
+plot(model_profile_knn1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "guarantor", "used_car"))  + ggtitle("Partial dependence profile ", "")
+```
+
+With LDA, there is the same effect than with previous models. 
+
+#### Neural network 
+
+
+```{r}
+model_profile_knn1 <- model_profile(explainer_knn, type = "partial", variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "install_rate"))
+
+plot(model_profile_knn1, variables = c("sav_acct", "chk_acct", "Log1pDurationstd", "history", "Log1pAmountstd", "install_rate")) + ggtitle("Partial dependence profile ", "")
+```
+
+For the variable intall_rate, the more percentage of installment rate as percentage of disposable income, the less likely is to be classified as good credit risk.
+
+
+**Common important variables between models**
+
+- chk_acct
+- Log1pDurationstd
+- sav_acct
+- history
+
+```{r}
+#Compare model for common important variables 
+
+model_profile_rf_com <- model_profile(explainer_rf, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_glm_com <- model_profile(explainer_glm, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_knn_com <- model_profile(explainer_knn, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_lda_com <- model_profile(explainer_lda, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+model_profile_nn_com <- model_profile(explainer_nn, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+
+plot(model_profile_rf_com, model_profile_glm_com, model_profile_knn_com, model_profile_lda_com, model_profile_nn_com, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history")) + ggtitle("Partial dependence profile", "")
+```
+
+The KNN model does not capture the effect of the Log1pDurationstd when predicting the model. Moreover, KNN seems to overestimate the effet of the history variable on the dependent variable and lda seems to underestimate it. Chk_acct and sav_acct effects  are well captured by each model. Therefore, they are very important variables to predict the good or bad credit.  
+
+
+
+## Instance level 
+
+```{r}
+#The instance we want to analyze (the 5th row)
+single_customer <- german[5,]
+```
+
+
+### Prediction parts 
+
+The break down profiles show the variations in the mean predictions. The plots are useful to assess the contribution of each variable to the prediction of the instance. Therefore, we look for changes in the predictions when values of variables are fixed. 
+
+Each explanatory variable is describing the instance we want to analyze. The following plots are summarizing the variations in the mean predictions when chk_acct is fixed to 0, male_single to 1, save_acct to 0, etc. 
+
+The intercept value corresponds to the mean value of predictions for the complete dataset. The following values show the changes in the mean prediction when values of variables are fixed. The prediction line in purple corresponds to the value of the prediction of the specific instance, it is the sum of the overall mean value and the variations. The green bars and the red ones show respectively the positive and the negative changes in the mean predictions. 
+
+
+#### Random forest model 
+
+```{r}
+#Random forest
+# explainer_rf %>% predict(single_customer)
+explainer_rf %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+Only the variable male_single has a positive variation in the mean prediction, while others have a negative variation. Chk_acct is the explanatory variable that influences the most the prediction of the instance. By fixing the chk_acct value to 0, we reduce the mean prediction.
+
+#### Logistic regression model 
+
+```{r}
+#Logistic regression
+# explainer_glm %>% predict(single_customer)
+explainer_glm %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+For the logistic regression, more variables have a positive variation on the mean prediction than in the random forest model. The variable chk_acct has the most negative change and influences the most the prediction. Besides chk_acct and prop_unkn_none, other variables have smaller effects on the mean prediction.  It could be because they are not important for the prediction or because they effect are closer to the mean of the prediction for this specific instance. 
+
+#### Nearest neighbour classification (KNN)
+
+```{r}
+#KNN
+# explainer_knn %>% predict(single_customer)
+explainer_knn %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+For the KNN model, we have more positive changes in the mean predicition, but chk_acct has still the most important variation, which is negative change again. 
+
+#### Linear discriminant analysis (LDA)
+
+```{r}
+#LDA
+explainer_lda %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+
+Here, sav_acct has less variation that in the KNN model.
+
+#### Neural network
+
+```{r}
+explainer_nn %>% predict_parts(new_observation = single_customer) %>% plot()
+```
+Male_single and histors have important positive variations while chk_acct and sav_acct have large negative changes. 
+
+### Prediction profile
+
+Important variables have a curve with much variation. With the analyse of the profile, we know the role of each variable in the preciction of the instance.
+
+We display two plots for each model, one for numerical variables and another one for categorical ones. 
+
+The blue points on the following plots indicates the value of the predicton of the single instance. 
+
+#### Random forest model 
+
+
+```{r}
+explainer_rf %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "guarantor", "history", "Log1pAmountstd"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+```
+
+
+We remark that the profile for the random forest model is a step function. 
+
+Here, the higher is the average balance in savings (sav_acct), the richer is the customer and the most likely he will be classified as good credit. His predicted good credit risk probability will increase by more than 10% if he has more than 1000 DM on his savings account. 
+
+For our specific instance, if he has a guarantor, he will be most likely classified as a good credit. Here, the observed customer has no guarantor and he is classified as bad credit. 
+
+
+
+#### Logistic regression model 
+
+- chk_acct
+- history
+- Log1pDurationstd
+- sav_acct
+- education
+- used_car
+
+```{r}
+explainer_glm %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "history", "education", "used_car"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+
+```
+The profile of the logistic regression is smooth unlike for the random forest model. 
+
+The more time lasts the credit, the less likely the customer will be classified as a good credit risk.
+
+Here, the customer has no educations, therefore he is more likely to be classified as good credit which is strange. 
+
+#### Nearest neighbour classification (KNN)
+
+
+```{r}
+
+explainer_knn %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "Log1pAmountstd", "history", "LogAgestd"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+```
+
+For KNN, there is much more variability, curves are not smooth. Therefore it is more complicated to predict. The trend for the sav_acct is less obvious than in other models. 
+
+
+#### Linear discriminant analysis (LDA)
+
+```{r}
+
+explainer_lda %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "guarantor",
+    "used_car", "history"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+```
+
+The effect is really obvious for chk_acct, used_car and Log1pDurationstd.
+
+#### Neural network
+
+```{r}
+explainer_nn %>% predict_profile(new_observation = single_customer) %>% plot(
+  variables = c(
+    "chk_acct",
+    "Log1pDurationstd",
+    "sav_acct",
+    "install_rate",
+    "Log1pAmountstd", "history"
+  )
+) + ggtitle("Ceteris-paribus profile", "")
+
+```
+
+Curves have the shape of waves, especially for the Log1pDurationstd. It means that the variable predict a good credit risk between -2 and -1 then the trend is falling.
+
+**Common important variables between models**
+
+Here, we compare the profiles of the most important common variables in our models. 
+
+
+- chk_acct
+- Log1pDurationstd
+- sav_acct
+- history
+
+```{r}
+#Compare model for common important variables 
+predict_profile_rf <- predict_profile(explainer_rf, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_glm<- predict_profile(explainer_glm, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_knn <- predict_profile(explainer_knn, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_lda <- predict_profile(explainer_lda, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+predict_profile_nn <- predict_profile(explainer_nn, new_observation = single_customer, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history"))
+
+plot(predict_profile_rf, predict_profile_glm, predict_profile_knn, predict_profile_lda, predict_profile_nn, variables = c("chk_acct", "Log1pDurationstd", "sav_acct", "history")) + ggtitle("Ceteris-paribus profile", "")
+```
+The effect of the variables is overestimated in KNN model. Or, all models besides KNN underestimate the effect in each variable. It can be both reasons.  
+
+
+
+
