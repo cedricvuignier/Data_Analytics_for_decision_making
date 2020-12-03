@@ -1,6 +1,6 @@
 --- 
-title: "YOUR TITLE HERE"
-author: "YOUR NAME HERE"
+title: "Data Analytics for Decision Making - Homework"
+author: "Gaëtan Lovey and Cédric Vuignier"
 date: "`r Sys.Date()`"
 site: bookdown::bookdown_site
 ---
